@@ -21,20 +21,20 @@ long lastMsg = 0;
 char msg[50];
 int value = 0;
 float floatValue = 0;
+int intentos=0;
 
 //BUS I2C
 CFF_ChipCap2 cc2 = CFF_ChipCap2(ChipCap_1);
 CFF_ChipCap2 cc3 = CFF_ChipCap2(ChipCap_2);
 SDP8XXSensor sdp;
-ADS1219 ads1(ADS_1);
-ADS1219 ads2(ADS_2);
+ADS1219 ads1(ADS_1); //mido la salida del humidificaor que indica si esta prendido o apagado
 
 //Reles
 Reless Rele1 = Reless(Rele1OUT);
 Reless Rele2 = Reless(Rele2OUT);
-Reless Rele3 = Reless(Rele3OUT);
-Reless Rele4 = Reless(Rele4OUT);
-Reless Rele5 = Reless(Rele5OUT);
+//Reless Rele3 = Reless(Rele3OUT);
+//Reless Rele4 = Reless(Rele4OUT);
+//Reless Rele5 = Reless(Rele5OUT);
 
 void setup_wifi() {
   delay(10);
@@ -105,36 +105,39 @@ void sendMQTT(String mqttSuscribe, float value){
   client.publish(mqttSuscribeChar, charString);
 };
 
-bool chekWaterStatus() 
-{
+bool chekWaterStatus() {
   //Leo adc 1
   float val1 = (float) ads1.readSingleEnded(0)*5/pow(2,23);
-  delay(100);
-  sendMQTT("esp32/ADC1",val1);
-  
-  //Leo adC2
-  float val2 = (float) ads2.readSingleEnded(0)*5/pow(2,23);
-  delay(100);
-  sendMQTT("esp32/ADC2",val2);
-
-  return true;
+  if (val1>2){
+    sendMQTT("esp32/ADC1",1);
+    return true;
+  } else if (val1<=2){
+    sendMQTT("esp32/ADC1",0);
+    return false;
+  }
 };
 
-void adsInit()
-{
+void adsInit(){
   //adc1
   ads1.begin();
   ads1.setVoltageReference(REF_EXTERNAL);
   ads1.setConversionMode(SINGLE_SHOT);
   ads1.setDataRate(20);
   ads1.setGain(ONE);
-  //adc 2
-  ads2.begin();
-  ads2.setVoltageReference(REF_EXTERNAL);
-  ads2.setConversionMode(SINGLE_SHOT);
-  ads2.setDataRate(20);
-  ads2.setGain(ONE);
 };
+
+void prenderHumidificador(){
+  Rele2.toggle();
+  delay(2000);
+  Rele2.toggle();
+  delay(500);
+}
+
+void llenarContenedorConAgua(){
+  Rele1.toggle();
+  delay(2000);
+  Rele1.toggle();
+}
 
 void setup(){
   //BUS I2C Init
@@ -188,9 +191,15 @@ void loop(){
     sendMQTT("esp32/humedad1",floatValue);
     floatValue = cc3.humidity;
     sendMQTT("esp32/humedad2",floatValue);
-    chekWaterStatus();
-    delay(1000);
+    if(!chekWaterStatus() && intentos<=6){
+      prenderHumidificador();
+      intentos++;
+    } else if (intentos>6){
+      llenarContenedorConAgua();
+      sendMQTT("esp32/ADC1",5);
+    } else {
+      intentos=0;
+    }
   }
-  delay(1000);
 };  
 
