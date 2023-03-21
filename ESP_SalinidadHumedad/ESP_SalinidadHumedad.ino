@@ -6,6 +6,7 @@
 #include "./SDP810/i2chelper.cpp"
 #include "./ChipCap2/CFF_ChipCap2.cpp"
 #include "./ADS1219/ADS1219.cpp"
+#include "./DS18B20/DS18B20.cpp"
 
 //Fin Funciones
 
@@ -23,19 +24,18 @@ int value = 0;
 float floatValue = 0;
 int intentos=0;
 bool testActivado = false;
+int cantidadAguaLLenada=0;
 
 //BUS I2C
-CFF_ChipCap2 cc2 = CFF_ChipCap2(ChipCap_1);
-CFF_ChipCap2 cc3 = CFF_ChipCap2(ChipCap_2);
 SDP8XXSensor sdp;
 ADS1219 ads1(ADS_1); //mido la salida del humidificaor que indica si esta prendido o apagado
+
+//OneWire
+DS18B20_devices ds18b20;
 
 //Reles
 Reless Rele1 = Reless(Rele1OUT);
 Reless Rele2 = Reless(Rele2OUT);
-//Reless Rele3 = Reless(Rele3OUT);
-//Reless Rele4 = Reless(Rele4OUT);
-//Reless Rele5 = Reless(Rele5OUT);
 
 Output_GPIO out1(GPIO26);
 Output_GPIO out2(GPIO27); 
@@ -77,7 +77,8 @@ void reconnect() {
       // Subscribe
       client.subscribe("esp32/output");
       client.subscribe("esp32/endTest");
-      client.subscribe("esp32/presion");
+      client.subscribe("esp32/onNiebla");
+      client.subscribe("esp32/offNiebla");
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -103,6 +104,14 @@ void callback(char* topic, byte* message, unsigned int length) {
     llenarContenedorConAgua(1000);
   }
 
+  if (String(topic) == "esp32/onNiebla") {
+    prenderHumidificador();
+  }
+
+  if (String(topic) == "esp32/offNiebla") {
+    apagarHumidificador();
+  }
+
   if (String(topic) == "esp32/presion") {
     out1.High();
     out2.High();
@@ -120,46 +129,60 @@ void callback(char* topic, byte* message, unsigned int length) {
       Serial.println("off");
       testActivado = false;
     }
-  }
-
-  
+  } 
 };
+
+void rSensorsSmqtt(){
+  //Leo sensores y envio por MQTT
+  /*cc2.readSensor();
+  delay(100);
+  cc3.readSensor();*/
+  ds18b20.getTemp();
+  int ret = sdp.readSample();    
+  floatValue = (float) sdp.getDifferentialPressure();
+  sendMQTT("esp32/presionSDP",floatValue);
+  floatValue = (float) sdp.getTemperature();
+  sendMQTT("esp32/tempSDP",floatValue);
+  //floatValue = cc2.temperatureC;
+  floatValue = ds18b20.TempCArray[0];
+  sendMQTT("esp32/temp1",floatValue);
+  //floatValue = cc3.temperatureC;
+  floatValue = ds18b20.TempCArray[1];
+  sendMQTT("esp32/temp2",floatValue);
+  floatValue = 0;
+  sendMQTT("esp32/humedad1",floatValue);
+  floatValue = 0;
+  sendMQTT("esp32/humedad2",floatValue);
+}
 
 void testHandle(){
   long now = millis();
   if (now - lastMsg > 5000) {
     lastMsg = now;
-    //Leo sensores y envio por MQTT
-    cc2.readSensor();
-    delay(100);
-    cc3.readSensor();
-    int ret = sdp.readSample();    
-    floatValue = (float) sdp.getDifferentialPressure();
-    sendMQTT("esp32/presionSDP",floatValue);
-    floatValue = (float) sdp.getTemperature();
-    sendMQTT("esp32/tempSDP",floatValue);
-    floatValue = cc2.temperatureC;
-    sendMQTT("esp32/temp1",floatValue);
-    floatValue = cc3.temperatureC;
-    sendMQTT("esp32/temp2",floatValue);
-    floatValue = cc2.humidity;
-    sendMQTT("esp32/humedad1",floatValue);
-    floatValue = cc3.humidity;
-    sendMQTT("esp32/humedad2",floatValue);
+    rSensorsSmqtt();
+    //Envio comando para subir por MQTT
     sendMQTT("esp32/finishMQTT",0);
     if(!chekWaterStatus() && intentos<=6){
       prenderHumidificador();
       intentos++;
     } else if (intentos>6){
+      if(cantidadAguaLLenada==0){
       llenarContenedorConAgua(2000);
+      cantidadAguaLLenada=1;
+      }
       intentos=0;
       sendMQTT("esp32/ADC1",5);
     } else {
       intentos=0;
     }
+    if(cantidadAguaLLenada==1){
+      delay(1000);
+      if(chekWaterStatus()){
+        cantidadAguaLLenada=0;
+      }
+    }
   }
-
-}
+};
 
 //Mqtt function Send
 void sendMQTT(String mqttSuscribe, float value){
@@ -176,12 +199,18 @@ void sendMQTT(String mqttSuscribe, float value){
 //Si esta prendido true/ apagado false
 bool chekWaterStatus() {
   //Leo adc 1
+  delay(2000);
   double val1 = (double) ads1.readSingleEnded(0)*5/pow(2,23);
+  for (int n = 0; n < 10 ; n++) {
+  val1 = val1 + (double) ads1.readSingleEnded(0)*5/pow(2,23);
+  delay(500);
+  }
+  Serial.print("ADC val: ");
   Serial.println(val1,5);
-  if (val1>2){
+  if (val1>1){
     sendMQTT("esp32/ADC1",1);
     return true;
-  } else if (val1<=2){
+  } else if (val1<=1){
     sendMQTT("esp32/ADC1",0);
     return false;
   }
@@ -198,16 +227,19 @@ void adsInit(){
 
 void prenderHumidificador(){
   if (!chekWaterStatus()){
-    Rele2.toggle();
+    Rele2.High();
     delay(1200);
-    Rele2.toggle();
+    Rele2.Low();
+    delay(1200);
   }
 }
 
 void apagarHumidificador(){
   while (chekWaterStatus()){
-    Rele2.toggle();
-    delay(1500);
+    Rele2.High();
+    delay(1200);
+    Rele2.Low();
+    delay(1200);
   }
 }
 
@@ -229,10 +261,10 @@ void setup(){
   //Client MQTT
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
-  //ChipCap Sensors begin
-  cc2.begin();
-  cc3.begin();
-  delay(200);
+  //DS18B20
+  ds18b20.findAddrSensorsDS18B20();
+  delay(1000);
+  //ads
   adsInit();
   delay(200);
   //Sensor de PResion Init
@@ -248,12 +280,16 @@ void loop(){
     reconnect();
   }
   client.loop();
-  Serial.println(testActivado);
+  sendMQTT("esp32/statusESP",testActivado);
   if (testActivado == true){
     Serial.println("Test Activado");
     testHandle();
   } else if (testActivado == false){
     Serial.println("Test Desactivado");
+    long now = millis();
+    if (now - lastMsg > 5000) {
+    rSensorsSmqtt();
+    }
     apagarHumidificador();
     lastMsg = 0;
     value = 0;
